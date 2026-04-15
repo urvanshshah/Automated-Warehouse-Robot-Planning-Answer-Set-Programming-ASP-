@@ -1,0 +1,169 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%    AUTOMATED WAREHOUSE PROBLEM USING ASP   %%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Author: Urvansh Shah
+% Purpose: Solve an automated warehouse logistics problem using Clingo and ASP
+% Approach: Model actions (move, pickup, putdown, deliver), enforce constraints, apply inertia, optimize.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%   INITIAL STATE SETUP  %%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Define node locations (grid cells)
+nodeLoc(N,pair(X,Y)) :- init(object(node,N), value(at,pair(X,Y))).
+pair(X,Y) :- init(object(node,N), value(at,pair(X,Y))).
+node(N) :- init(object(node,N), value(at,pair(X,Y))).
+
+% Define highways (no drop zones)
+highway(N) :- init(object(highway,N), value(at,pair(X,Y))).
+
+% Define robots and initial locations
+robot(R) :- init(object(robot,R), value(at,pair(X,Y))).
+robotLoc(R,object(node,N),0) :- init(object(robot,R), value(at,pair(X,Y))), nodeLoc(N,pair(X,Y)).
+
+% Define shelves and their initial locations
+shelf(S) :- init(object(shelf,S), value(at,pair(X,Y))).
+shelfLoc(S,object(node,N),0) :- init(object(shelf,S), value(at,pair(X,Y))), nodeLoc(N,pair(X,Y)).
+
+% Define products on shelves
+product(P) :- init(object(product,P), value(on,pair(S,Q))).
+productLoc(P,object(shelf,S),with(quantity,Q),0) :- init(object(product,P), value(on,pair(S,Q))).
+
+% Define picking stations and orders
+pickingStation(P) :- init(object(pickingStation,P), value(at,pair(X,Y))).
+pickingStationLoc(P,N) :- init(object(pickingStation,P), value(at,pair(X,Y))), nodeLoc(N,pair(X,Y)).
+order(O) :- init(object(order,O), value(pickingStation,P)).
+orderAt(O,object(node,N),contains(P,Q),0) :- init(object(order,O), value(pickingStation,P)), pickingStationLoc(P,N),
+                                              init(object(order,O), value(line,pair(P,Q))).
+
+% Define time
+#const maxT=10.
+time(0..maxT).
+maxT = 30.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%   MOVEMENT AND ACTIONS  %%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Define possible movement directions
+move(1,0; -1,0; 0,1; 0,-1).
+
+% Robot actions at each time step
+{ robotMove(R,move(DX,DY),T) : move(DX,DY) }1 :- robot(R), time(T).
+{ pickUpShelf(R,S,T) : shelf(S) }1 :- robot(R), time(T).
+{ putDownShelf(R,S,T) : shelf(S) }1 :- robot(R), time(T).
+{ deliver(R,O,with(S,P,Q),T) : orderAt(O,object(node,N),contains(P,OQ),T), productLoc(P,object(shelf,S),with(quantity,PQ),T), Q=1..PQ }1 :- robot(R), time(T).
+
+% Define occurs predicate
+occurs(object(robot,R),move(X,Y),T) :- robotMove(R,move(X,Y),T).
+occurs(object(robot,R),pickup,T) :- pickUpShelf(R,_,T).
+occurs(object(robot,R),putdown,T) :- putDownShelf(R,_,T).
+occurs(object(robot,R),deliver(O,P,Q),T) :- deliver(R,O,with(_,P,Q),T).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%   ACTION CONSTRAINTS   %%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% No multiple actions at the same time
+:- occurs(object(robot,R),A1,T), occurs(object(robot,R),A2,T), A1 != A2.
+
+% Movement must stay within grid (assume warehouse grid is between (1,1) and (16,16))
+:- robotLoc(R,object(node,N),T), robotMove(R,move(DX,DY),T), nodeLoc(N,pair(X,Y)), X+DX < 1.
+:- robotLoc(R,object(node,N),T), robotMove(R,move(DX,DY),T), nodeLoc(N,pair(X,Y)), Y+DY < 1.
+:- robotLoc(R,object(node,N),T), robotMove(R,move(DX,DY),T), nodeLoc(N,pair(X,Y)), X+DX > 16.
+:- robotLoc(R,object(node,N),T), robotMove(R,move(DX,DY),T), nodeLoc(N,pair(X,Y)), Y+DY > 16.
+
+% Pickup constraints
+:- 2{ pickUpShelf(R,S,T) : robot(R) }, shelf(S).
+:- pickUpShelf(R,S,T), shelfLoc(S,object(node,N),T), not robotLoc(R,object(node,N),T).
+:- pickUpShelf(R,S,T), shelfLoc(S,object(robot,OtherR),T).
+
+% Putdown constraints
+:- 2{ putDownShelf(R,S,T) : robot(R) }, shelf(S).
+:- putDownShelf(R,S,T), not shelfLoc(S,object(robot,R),T).
+:- putDownShelf(R,S,T), robotLoc(R,object(node,N),T), highway(N).
+
+% Delivery constraints
+:- deliver(R,O,with(S,P,Q),T), orderAt(O,object(node,N),contains(P,OQ),T), not robotLoc(R,object(node,N),T).
+:- deliver(R,O,with(S,P,Q),T), not shelfLoc(S,object(robot,R),T).
+:- deliver(R,O,with(S,P,Q),T), orderAt(O,object(node,N),contains(P,OQ),T), Q > OQ.
+:- deliver(R,O,with(S,P,Q),T), productLoc(P,object(shelf,S),with(quantity,PQ),T), Q > PQ.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%   STATE CONSTRAINTS    %%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% No robot collisions
+:- 2{ robotLoc(R,object(node,N),T) : robot(R) }, node(N).
+
+% No shelf collisions
+:- 2{ shelfLoc(S,object(node,N),T) : shelf(S) }, node(N).
+
+% No robot swap positions
+:- robotLoc(R1,object(node,N1),T), robotLoc(R1,object(node,N2),T+1),
+   robotLoc(R2,object(node,N2),T), robotLoc(R2,object(node,N1),T+1), R1 != R2.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%   EFFECTS OF ACTIONS   %%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Robot movement
+robotLoc(R,object(node,NewN),T+1) :-
+    robotLoc(R,object(node,N),T),
+    robotMove(R,move(DX,DY),T),
+    nodeLoc(N,pair(X,Y)),
+    nodeLoc(NewN,pair(X+DX,Y+DY)).
+
+% Shelf pickup
+shelfLoc(S,object(robot,R),T+1) :-
+    pickUpShelf(R,S,T),
+    shelfLoc(S,object(node,N),T),
+    robotLoc(R,object(node,N),T).
+
+% Shelf putdown
+shelfLoc(S,object(node,N),T+1) :-
+    putDownShelf(R,S,T),
+    shelfLoc(S,object(robot,R),T),
+    robotLoc(R,object(node,N),T).
+
+% Product delivery
+orderAt(O,object(node,N),contains(P,NewQ),T+1) :-
+    deliver(R,O,with(S,P,DQ),T),
+    orderAt(O,object(node,N),contains(P,OldQ),T),
+    NewQ = OldQ - DQ.
+
+productLoc(P,object(shelf,S),with(quantity,NewPQ),T+1) :-
+    deliver(R,O,with(S,P,DQ),T),
+    productLoc(P,object(shelf,S),with(quantity,OldPQ),T),
+    NewPQ = OldPQ - DQ.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%      INERTIA RULES     %%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Maintain positions if no action
+robotLoc(R,object(node,N),T+1) :- robotLoc(R,object(node,N),T), not robotMove(R,_,T).
+shelfLoc(S,object(node,N),T+1) :- shelfLoc(S,object(node,N),T), not pickUpShelf(_,S,T).
+shelfLoc(S,object(robot,R),T+1) :- shelfLoc(S,object(robot,R),T), not putDownShelf(R,S,T).
+orderAt(O,object(node,N),contains(P,Q),T+1) :- orderAt(O,object(node,N),contains(P,Q),T), not deliver(_,O,with(_,P,_),T).
+productLoc(P,object(shelf,S),with(quantity,Q),T+1) :- productLoc(P,object(shelf,S),with(quantity,Q),T), not deliver(_,_,with(S,P,_),T).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%     GOAL CONDITIONS    %%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% All orders must be fully completed by maxT
+:- order(O), orderAt(O,object(node,_),contains(P,Q),maxT), Q > 0.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%   OPTIMIZATION CRITERIA %%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+#minimize { T,R : occurs(object(robot,R),_,T) }.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%    OUTPUT    %%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+#show occurs/3.
